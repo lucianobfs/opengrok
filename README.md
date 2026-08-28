@@ -54,7 +54,7 @@ knobs. opengrok fixes the wire:
 |---|---|---|
 | **Grok (xAI)** | effort knob is `xhigh`, not `max`; `fast` has no field | literal token mapping, always-on reasoning documented |
 | **GLM (Zhipu)** | thinks by default — silence is *expensive*; `max` is real | verified token table + true off-switch via `thinking:disabled` |
-| **Claude** | thinking is owned by the auth shim; body-painting it 400s | shim-owned thinking, effort passes clean |
+| **Claude** | thinking is owned by the auth shim; body-painting it 400s | shim ships in-repo (`tools/claude-shim.py`), shim-owned thinking, effort passes clean |
 | **Gemini** | "fast" was decorative — the knob is the *slug*, not a field | fast lane rerouting, measured 1.5s → 0.9s first token |
 | **DeepSeek** | thinking lives in the model slug, not the body | slug-owns-thinking mapping |
 | **local models** | context/recovery edges | dedicated route, fail-closed |
@@ -112,6 +112,7 @@ Hard-won rules this repo encodes — each one earned by a real failure:
 node tools/test-provider-maps.cjs       # 23/23 — Contract A
 node tools/test-provider-maps-hop.cjs   #  6/6 — Contract B
 python tools/qa.py                      # leak scan, ref integrity, suites
+uv run --with 'anthropic>=1' python3 tools/test-claude-shim.py  # 35/35 — Claude shim
 ```
 
 CI runs all three on every push and PR. The QA tool is itself
@@ -131,7 +132,7 @@ Run it, paste the verdict into a PR with the capture attached.
 
 - ✅ Working today: Grok, GLM, Claude plans, Gemini (incl. fast lane), DeepSeek, local llama.cpp
 - 🧪 Pattern proven, capture pending: OpenRouter, Groq, Mistral, xAI OAuth
-- 📄 Docs: [MODEL-GUIDELINES](docs/MODEL-GUIDELINES.md) · [BYOK vs hop](docs/BYOK-DECISION.md) · [FAILURE-MODES](docs/FAILURE-MODES.md) · [CLOUD-HOST](docs/CLOUD-HOST.md) · [ROADMAP](docs/ROADMAP.md)
+- 📄 Docs: [MODEL-GUIDELINES](docs/MODEL-GUIDELINES.md) · [BYOK vs hop](docs/BYOK-DECISION.md) · [FAILURE-MODES](docs/FAILURE-MODES.md) · [CLOUD-HOST](docs/CLOUD-HOST.md) · [CLAUDE-SHIM](docs/CLAUDE-SHIM.md) · [ROADMAP](docs/ROADMAP.md)
 
 ---
 

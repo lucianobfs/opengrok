@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  EXAMPLE launchd LaunchAgent for tools/claude-shim.py — structure only.
+
+  Copy to ~/Library/LaunchAgents/com.opengrok.claude-shim.plist, replace every
+  PLACEHOLDER path below with your own, then:
+
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.opengrok.claude-shim.plist
+    launchctl kickstart  gui/$(id -u)/com.opengrok.claude-shim
+
+  NEVER put ANTHROPIC_API_KEY (or any credential) inside this file — a plist
+  is stored world-readable under ~/Library/LaunchAgents and `launchctl list`
+  can print its EnvironmentVariables block back to any local session. Instead:
+
+    (a) rely on `ant auth login` (the SDK's own credential store, no env var
+        needed at all), OR
+    (b) put ANTHROPIC_API_KEY=sk-ant-... in a chmod-600 dotfile
+        (e.g. ~/.config/opengrok/claude-shim.env, `chmod 600` it) and point
+        ProgramArguments at a tiny wrapper script that sources the file
+        before exec'ing uv, e.g.:
+
+          #!/bin/sh
+          set -a; . "$HOME/.config/opengrok/claude-shim.env"; set +a
+          exec "$HOME/.local/bin/uv" run "$HOME/PLACEHOLDER-path-to/opengrok/tools/claude-shim.py"
+
+        then point ProgramArguments at that wrapper instead of uv directly.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.opengrok.claude-shim</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/PLACEHOLDER-USER/.local/bin/uv</string>
+    <string>run</string>
+    <string>/Users/PLACEHOLDER-USER/PLACEHOLDER-path-to/opengrok/tools/claude-shim.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/PLACEHOLDER-USER/PLACEHOLDER-path-to/opengrok</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CLAUDE_SHIM_HOST</key>
+    <string>127.0.0.1</string>
+    <key>CLAUDE_SHIM_PORT</key>
+    <string>18776</string>
+    <!--
+      ANTHROPIC_API_KEY deliberately NOT set here — see the comment above.
+      If you must set it via launchd rather than a wrapper script, do so in a
+      SEPARATE, chmod-600, gitignored plist you generate locally and never
+      commit — not in this example file.
+    -->
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/PLACEHOLDER-USER/Library/Logs/opengrok/claude-shim.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/PLACEHOLDER-USER/Library/Logs/opengrok/claude-shim.err.log</string>
+</dict>
+</plist>

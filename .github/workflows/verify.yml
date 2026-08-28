@@ -24,3 +24,7 @@ jobs:
         run: node tools/test-provider-maps-hop.cjs
       - name: repo self-check (leaks, refs, compile)
         run: python tools/qa.py
+      - name: Claude shim — offline unit tests
+        run: |
+          pip install 'anthropic>=1'
+          python tools/test-claude-shim.py

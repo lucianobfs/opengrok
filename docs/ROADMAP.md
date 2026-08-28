@@ -15,13 +15,18 @@ and survive Grok Bot updates.**
 - ✅ **BYOK decision doc** — native BYOK vs hop lane, honest trade-offs
 - ✅ Wire maps live-verified: grok, claude, gemini, glm, deepseek, qwen-local, nano-gpt
 - ✅ Update survival: hot-reload maps + doctor tripwire + failure encyclopedia (F01–F18)
+- ✅ **Claude hop shim** — `tools/claude-shim.py` ships in-repo: OpenAI wire ->
+      native Anthropic Messages via the official SDK, adaptive thinking pinned,
+      prompt caching, SSE + tool-call mapping. Tests (`tools/test-claude-shim.py`),
+      launchd example, runbook ([CLAUDE-SHIM](CLAUDE-SHIM.md)), CI wired.
 
 ## Open (bounded, design settled)
 
 - [ ] **More provider maps** — mechanical now: run wire-probe, follow CONTRIBUTING.
       Candidates by demand: OpenRouter passthrough quirks, Mistral, Groq, xAI native key lane.
-- [ ] **OAuth flow guides per provider** — claude-shim pattern generalized; needs
-      per-provider consent-screen walkthroughs (screenshots + token storage contract)
+- [ ] **OAuth flow guides per remaining provider** — claude-shim pattern (now
+      shipped) generalized to the others; needs per-provider consent-screen
+      walkthroughs (screenshots + token storage contract)
 - [ ] **Picker: inline model-add** — currently reads hop routes; add "custom model"
       row that runs wire-probe from the UI and writes the map draft
 - [ ] **doctor as packaged cron** — one-flag install of the scheduled watchdog
