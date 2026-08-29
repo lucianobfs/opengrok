@@ -30,3 +30,11 @@ jobs:
           python tools/test-claude-shim.py
       - name: Codex shim — offline unit tests
         run: python tools/test-codex-shim.py
+      - name: Box hop executor — offline unit tests
+        run: node tools/test-hop-executor.cjs
+      - name: Box patcher — offline unit tests
+        run: python tools/test-apply-box-patch.py
+      - name: Box supervisor restart — offline unit tests
+        run: python tools/test-box-restart-host.py
+      - name: Box bindings — offline unit tests
+        run: python tools/test-box-bind.py

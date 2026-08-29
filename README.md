@@ -83,10 +83,13 @@ real token).
 
 **Cloud agents need one more step.** Stock Grok Bot cloud hosts do not read
 `model-bindings.json` — a saved binding is ignored until you install the
-binding consumer into the host. `tools/apply-box-patch.py` does that (anchored,
-idempotent, backs up first), and `tools/file-relay.py` is the box-side file
-relay the picker pushes bindings to. See [CLOUD-HOST](docs/CLOUD-HOST.md) for
-the full local → push → patch → bounce → verify flow.
+binding consumer into the host. `tools/apply-box-patch.py` installs it
+(anchored, idempotent, backs up first), `tools/hop-executor.cjs` is the
+injected box-side executor it wires in, `tools/box-bootstrap.sh` sets up a
+box end to end (checkout, executor, shim, patch, supervisor restart), and
+`tools/box-bind.py` upserts one agent's binding. See
+[CLOUD-HOST](docs/CLOUD-HOST.md) for the full bootstrap → bind → patch →
+supervisor-restart → verify flow.
 
 ## 🛡️ Update-proof by design
 
@@ -115,6 +118,10 @@ node tools/test-provider-maps-hop.cjs   #  6/6 — Contract B
 python tools/qa.py                      # leak scan, ref integrity, suites
 uv run --with 'anthropic>=1' python3 tools/test-claude-shim.py  # 35/35 — Claude shim
 python3 tools/test-codex-shim.py        # 79/79 — Codex shim
+node tools/test-hop-executor.cjs        # box-side hop executor
+python3 tools/test-apply-box-patch.py   # stock-bundle patcher
+python3 tools/test-box-restart-host.py  # supervisor restart protocol
+python3 tools/test-box-bind.py          # bindings upsert
 ```
 
 CI runs all three on every push and PR. The QA tool is itself

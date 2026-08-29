@@ -60,3 +60,17 @@ Conditional skips in suites look green. Make environment requirements explicit f
 After ANY claim-shaped event ("saved the doc", "applied the patch", "restarted the server"):
 `ls -la` the file · read back a checksummed excerpt · netstat the port.
 An agent (or human!) reporting success without artifact proof is running on vibes; several documented incidents in this stack trace exactly to trusting that report.
+
+## Suites in this repo
+
+```bash
+node tools/test-provider-maps.cjs       # Contract A
+node tools/test-provider-maps-hop.cjs   # Contract B
+python tools/qa.py                      # leak scan, ref integrity, suites
+uv run --with 'anthropic>=1' python3 tools/test-claude-shim.py
+python3 tools/test-codex-shim.py
+node tools/test-hop-executor.cjs        # box-side hop executor (Rule 4: real SSE server, no mirrored logic)
+python3 tools/test-apply-box-patch.py   # stock-bundle patcher (fixture + real bundle when present, Rule 3)
+python3 tools/test-box-restart-host.py  # supervisor restart protocol (mocked gateway/health/status, Rule 6)
+python3 tools/test-box-bind.py          # bindings upsert
+```
