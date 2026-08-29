@@ -1,0 +1,38 @@
+# EXAMPLE systemd USER unit for tools/codex-shim.py — structure only.
+#
+# Install (as the user that will run `codex login` and this shim):
+#   mkdir -p ~/.config/systemd/user
+#   cp examples/opengrok-codex-shim.service ~/.config/systemd/user/
+#   # edit every PLACEHOLDER path below
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now opengrok-codex-shim.service
+#   loginctl enable-linger "$USER"   # keep it running after you log out
+#
+# Credential: there is no EnvironmentFile here, unlike the Claude shim — this
+# shim has no API key. The credential is ~/.codex/auth.json (or
+# $CODEX_HOME/auth.json), written once by `codex login` (use
+# `codex login --device-auth` on a headless box) as the SAME user this unit
+# runs as, then refreshed in place by the shim. Never copy that file between
+# machines: refresh tokens rotate and are single-use, so a copy invalidates
+# the original the first time either one refreshes.
+
+[Unit]
+Description=opengrok Codex hop shim (:18777)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/PLACEHOLDER/path/to/opengrok
+ExecStart=/PLACEHOLDER/path/to/uv run /PLACEHOLDER/path/to/opengrok/tools/codex-shim.py
+Restart=always
+RestartSec=5
+Environment=CODEX_SHIM_HOST=127.0.0.1
+Environment=CODEX_SHIM_PORT=18777
+
+# Uncomment only if this box keeps the Codex CLI home somewhere other than
+# the default ~/.codex — never put a credential value directly in this file:
+# Environment=CODEX_HOME=/PLACEHOLDER/path/to/codex-home
+
+[Install]
+WantedBy=default.target

@@ -28,3 +28,5 @@ jobs:
         run: |
           pip install 'anthropic>=1'
           python tools/test-claude-shim.py
+      - name: Codex shim — offline unit tests
+        run: python tools/test-codex-shim.py

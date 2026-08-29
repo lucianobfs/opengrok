@@ -1,0 +1,35 @@
+# EXAMPLE systemd USER unit for tools/claude-shim.py — structure only.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp examples/opengrok-claude-shim.service ~/.config/systemd/user/
+#   # edit every PLACEHOLDER path below
+#   printf 'ANTHROPIC_API_KEY=sk-ant-...\n' > ~/.config/opengrok/claude-shim.env
+#   chmod 600 ~/.config/opengrok/claude-shim.env
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now opengrok-claude-shim.service
+#   loginctl enable-linger "$USER"   # keep it running after you log out
+#
+# Credential: ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) never goes directly
+# in this unit file — systemd unit files under ~/.config/systemd/user are not
+# secret-safe (world-readable by default, and `systemctl --user show` can
+# echo Environment= back). Put the key in a chmod-600 EnvironmentFile
+# instead, one KEY=value per line, no quotes.
+
+[Unit]
+Description=opengrok Claude hop shim (:18776)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/PLACEHOLDER/path/to/opengrok
+ExecStart=/PLACEHOLDER/path/to/uv run /PLACEHOLDER/path/to/opengrok/tools/claude-shim.py
+Restart=always
+RestartSec=5
+Environment=CLAUDE_SHIM_HOST=127.0.0.1
+Environment=CLAUDE_SHIM_PORT=18776
+EnvironmentFile=/PLACEHOLDER-USER/.config/opengrok/claude-shim.env
+
+[Install]
+WantedBy=default.target

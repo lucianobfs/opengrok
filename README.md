@@ -55,6 +55,7 @@ knobs. opengrok fixes the wire:
 | **Grok (xAI)** | effort knob is `xhigh`, not `max`; `fast` has no field | literal token mapping, always-on reasoning documented |
 | **GLM (Zhipu)** | thinks by default — silence is *expensive*; `max` is real | verified token table + true off-switch via `thinking:disabled` |
 | **Claude** | thinking is owned by the auth shim; body-painting it 400s | shim ships in-repo (`tools/claude-shim.py`), shim-owned thinking, effort passes clean |
+| **GPT / Codex** | ChatGPT plan auth ≠ an API key; effort + fast tier are slug-owned | shim ships in-repo (`tools/codex-shim.py`), reuses the Codex CLI's own OAuth token, effort/fast validated against the model catalog — see [CODEX-SHIM](docs/CODEX-SHIM.md) |
 | **Gemini** | "fast" was decorative — the knob is the *slug*, not a field | fast lane rerouting, measured 1.5s → 0.9s first token |
 | **DeepSeek** | thinking lives in the model slug, not the body | slug-owns-thinking mapping |
 | **local models** | context/recovery edges | dedicated route, fail-closed |
@@ -113,6 +114,7 @@ node tools/test-provider-maps.cjs       # 23/23 — Contract A
 node tools/test-provider-maps-hop.cjs   #  6/6 — Contract B
 python tools/qa.py                      # leak scan, ref integrity, suites
 uv run --with 'anthropic>=1' python3 tools/test-claude-shim.py  # 35/35 — Claude shim
+python3 tools/test-codex-shim.py        # 67/67 — Codex shim
 ```
 
 CI runs all three on every push and PR. The QA tool is itself
@@ -130,9 +132,9 @@ Run it, paste the verdict into a PR with the capture attached.
 
 ## 🗺️ Status
 
-- ✅ Working today: Grok, GLM, Claude plans, Gemini (incl. fast lane), DeepSeek, local llama.cpp
+- ✅ Working today: Grok, GLM, Claude plans, Codex plans, Gemini (incl. fast lane), DeepSeek, local llama.cpp
 - 🧪 Pattern proven, capture pending: OpenRouter, Groq, Mistral, xAI OAuth
-- 📄 Docs: [MODEL-GUIDELINES](docs/MODEL-GUIDELINES.md) · [BYOK vs hop](docs/BYOK-DECISION.md) · [FAILURE-MODES](docs/FAILURE-MODES.md) · [CLOUD-HOST](docs/CLOUD-HOST.md) · [CLAUDE-SHIM](docs/CLAUDE-SHIM.md) · [ROADMAP](docs/ROADMAP.md)
+- 📄 Docs: [MODEL-GUIDELINES](docs/MODEL-GUIDELINES.md) · [BYOK vs hop](docs/BYOK-DECISION.md) · [FAILURE-MODES](docs/FAILURE-MODES.md) · [CLOUD-HOST](docs/CLOUD-HOST.md) · [CLAUDE-SHIM](docs/CLAUDE-SHIM.md) · [CODEX-SHIM](docs/CODEX-SHIM.md) · [ROADMAP](docs/ROADMAP.md)
 
 ---
 

@@ -19,14 +19,22 @@ and survive Grok Bot updates.**
       native Anthropic Messages via the official SDK, adaptive thinking pinned,
       prompt caching, SSE + tool-call mapping. Tests (`tools/test-claude-shim.py`),
       launchd example, runbook ([CLAUDE-SHIM](CLAUDE-SHIM.md)), CI wired.
+- ✅ **Codex hop shim** — `tools/codex-shim.py` ships in-repo on port 18777:
+      OpenAI wire -> ChatGPT Codex backend Responses API, authenticated by
+      reusing the Codex CLI's own `codex login` OAuth token store
+      (`~/.codex/auth.json`), refreshed in place. Effort + `-fast` ride the
+      model slug and are validated against `~/.codex/models_cache.json`.
+      Tests (`tools/test-codex-shim.py`, 67/67), launchd + systemd examples,
+      runbook ([CODEX-SHIM](CODEX-SHIM.md)), CI wired.
 
 ## Open (bounded, design settled)
 
 - [ ] **More provider maps** — mechanical now: run wire-probe, follow CONTRIBUTING.
       Candidates by demand: OpenRouter passthrough quirks, Mistral, Groq, xAI native key lane.
-- [ ] **OAuth flow guides per remaining provider** — claude-shim pattern (now
-      shipped) generalized to the others; needs per-provider consent-screen
-      walkthroughs (screenshots + token storage contract)
+- [ ] **OAuth flow guides per remaining provider** — claude-shim / codex-shim
+      pattern (now shipped for both) generalized to the others; needs
+      per-provider consent-screen walkthroughs (screenshots + token storage
+      contract)
 - [ ] **Picker: inline model-add** — currently reads hop routes; add "custom model"
       row that runs wire-probe from the UI and writes the map draft
 - [ ] **doctor as packaged cron** — one-flag install of the scheduled watchdog

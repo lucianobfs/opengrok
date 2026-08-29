@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  EXAMPLE launchd LaunchAgent for tools/codex-shim.py — structure only.
+
+  Copy to ~/Library/LaunchAgents/com.opengrok.codex-shim.plist, replace every
+  PLACEHOLDER path below with your own, then:
+
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.opengrok.codex-shim.plist
+    launchctl kickstart  gui/$(id -u)/com.opengrok.codex-shim
+
+  There is NO API key to put in this file. The credential is
+  ~/.codex/auth.json, written once by `codex login` (run it as the same user
+  this LaunchAgent runs as) and refreshed in place by the shim itself. Never
+  copy that file to another machine — refresh tokens rotate and are
+  single-use, so a copy invalidates the original the first time either one
+  refreshes. Log in again on each machine instead.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.opengrok.codex-shim</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/PLACEHOLDER-USER/.local/bin/uv</string>
+    <string>run</string>
+    <string>/Users/PLACEHOLDER-USER/PLACEHOLDER-path-to/opengrok/tools/codex-shim.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/PLACEHOLDER-USER/PLACEHOLDER-path-to/opengrok</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CODEX_SHIM_HOST</key>
+    <string>127.0.0.1</string>
+    <key>CODEX_SHIM_PORT</key>
+    <string>18777</string>
+    <!--
+      CODEX_HOME deliberately left unset here (defaults to ~/.codex). Only
+      set it if you keep a non-default Codex CLI home, and never put a
+      credential value here — auth.json already lives on disk from
+      `codex login`.
+    -->
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/PLACEHOLDER-USER/Library/Logs/opengrok/codex-shim.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/PLACEHOLDER-USER/Library/Logs/opengrok/codex-shim.err.log</string>
+</dict>
+</plist>
