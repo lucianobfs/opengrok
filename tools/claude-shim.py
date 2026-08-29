@@ -132,6 +132,22 @@ CRED_HELP = (
     "as the user that runs the shim"
 )
 
+# anthropic SDK 1.x message emitted at REQUEST time (not construction time) when
+# neither ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN nor an `ant auth login`
+# profile resolves. anthropic.Anthropic() itself constructs fine with zero
+# credentials on this SDK version; the client raises a builtins.TypeError
+# lazily, the first time a call is actually made.
+CRED_RESOLUTION_MSG = "Could not resolve authentication method"
+
+
+def is_credential_resolution_error(exc: Exception) -> bool:
+    """True for the SDK 1.x TypeError raised at request time with no credential.
+
+    Pure/offline-testable: matches on exception type and message text only,
+    never touches the network or the client.
+    """
+    return isinstance(exc, TypeError) and CRED_RESOLUTION_MSG in str(exc)
+
 
 class ShimError(Exception):
     """Client-visible failure with an HTTP status and OpenAI error shape."""
@@ -721,7 +737,10 @@ def probe_upstream(force: bool = False) -> tuple[bool, str]:
     except ShimError as exc:
         ok, detail = False, exc.type
     except Exception as exc:
-        ok, detail = False, type(exc).__name__  # class name only; never the body
+        if is_credential_resolution_error(exc):
+            ok, detail = False, "no_credentials"
+        else:
+            ok, detail = False, type(exc).__name__  # class name only; never the body
     _probe_state.update({"ts": now, "ok": ok, "detail": detail})
     return ok, detail
 
@@ -789,6 +808,9 @@ def openai_models_payload() -> dict[str, Any]:
 
 def shim_error_from_exception(exc: Exception) -> ShimError:
     """SDK exception -> client-visible error, most specific first."""
+    if is_credential_resolution_error(exc):
+        return ShimError(401, "%s (upstream: no credential resolved)" % CRED_HELP,
+                         type_="authentication_error", code="401")
     if anthropic is not None:
         if isinstance(exc, anthropic.AuthenticationError):
             return ShimError(401, "%s (upstream: %s)" % (CRED_HELP, exc.message),
@@ -1052,16 +1074,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         ok, detail = probe_upstream(force=True)
+        if not ok and detail == "no_credentials":
+            print("claude-shim upstream UNREACHABLE: no Anthropic credentials resolved "
+                  "(%s)" % CRED_HELP)
+            return 1
         print("claude-shim upstream %s (%s)" % ("OK" if ok else "UNREACHABLE", detail))
         return 0 if ok else 1
 
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True
     ok, detail = probe_upstream(force=True)
+    detail_msg = "no Anthropic credentials resolved" if detail == "no_credentials" else detail
     log.info("claude-shim listening http://%s:%d/v1 -> Anthropic Messages API "
-             "(upstream_reachable=%s, %s)", args.host, args.port, ok, detail)
+             "(upstream_reachable=%s, %s)", args.host, args.port, ok, detail_msg)
     if not ok:
-        log.warning("upstream probe failed (%s) — %s", detail, CRED_HELP)
+        log.warning("upstream probe failed (%s) — %s", detail_msg, CRED_HELP)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

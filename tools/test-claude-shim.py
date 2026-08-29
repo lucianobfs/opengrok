@@ -500,6 +500,35 @@ class ThinkingReplayTests(unittest.TestCase):
         self.assertTrue(all(b["type"] != "thinking" for b in blocks))
 
 
+# --- (o) SDK credential-resolution TypeError -> 401 -------------------------
+
+class CredentialResolutionErrorTests(unittest.TestCase):
+    CRED_MSG = (
+        "Could not resolve authentication method. Expected one of api_key, "
+        "auth_token, or credentials to be set. Or for one of the `X-Api-Key` "
+        "or `Authorization` headers to be explicitly omitted"
+    )
+
+    def test_credential_resolution_typeerror_maps_to_401_auth_error(self) -> None:
+        err = shim.shim_error_from_exception(TypeError(self.CRED_MSG))
+        self.assertEqual(err.status, 401)
+        self.assertEqual(err.type, "authentication_error")
+        self.assertIn("ANTHROPIC_API_KEY", err.message)
+        self.assertIn("ant auth login", err.message)
+
+    def test_unrelated_typeerror_still_maps_to_500(self) -> None:
+        err = shim.shim_error_from_exception(TypeError("unhashable type: 'dict'"))
+        self.assertEqual(err.status, 500)
+
+    def test_is_credential_resolution_error_false_for_valueerror(self) -> None:
+        self.assertFalse(shim.is_credential_resolution_error(ValueError(self.CRED_MSG)))
+
+    def test_is_credential_resolution_error_true_for_typeerror_subclass(self) -> None:
+        class MyTypeError(TypeError):
+            pass
+        self.assertTrue(shim.is_credential_resolution_error(MyTypeError(self.CRED_MSG)))
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = loader.loadTestsFromModule(sys.modules[__name__])
