@@ -24,7 +24,7 @@ and survive Grok Bot updates.**
       reusing the Codex CLI's own `codex login` OAuth token store
       (`~/.codex/auth.json`), refreshed in place. Effort + `-fast` ride the
       model slug and are validated against `~/.codex/models_cache.json`.
-      Tests (`tools/test-codex-shim.py`, 67/67), launchd + systemd examples,
+      Tests (`tools/test-codex-shim.py`, 79/79), launchd + systemd examples,
       runbook ([CODEX-SHIM](CODEX-SHIM.md)), CI wired.
 
 ## Open (bounded, design settled)

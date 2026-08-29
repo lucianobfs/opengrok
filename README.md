@@ -114,7 +114,7 @@ node tools/test-provider-maps.cjs       # 23/23 — Contract A
 node tools/test-provider-maps-hop.cjs   #  6/6 — Contract B
 python tools/qa.py                      # leak scan, ref integrity, suites
 uv run --with 'anthropic>=1' python3 tools/test-claude-shim.py  # 35/35 — Claude shim
-python3 tools/test-codex-shim.py        # 67/67 — Codex shim
+python3 tools/test-codex-shim.py        # 79/79 — Codex shim
 ```
 
 CI runs all three on every push and PR. The QA tool is itself

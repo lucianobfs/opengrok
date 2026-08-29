@@ -76,6 +76,20 @@ Env vars (all optional):
 
 `--host` / `--port` flags override the env vars for a one-off run.
 
+### TLS trust
+
+Every outbound call verifies the certificate, and the shim makes sure it has
+something to verify against. It uses Python's default trust store first
+(`SSL_CERT_FILE` / `SSL_CERT_DIR` included). That store is EMPTY on a python.org
+build whose `Install Certificates.command` never ran — it points at a CA file
+that does not exist, so every HTTPS call fails `CERTIFICATE_VERIFY_FAILED` on a
+machine where `curl` works. In that case the shim loads the host bundle OpenSSL
+and `curl` already use (`/etc/ssl/cert.pem` on macOS, `ca-certificates.crt` on
+Linux), or `certifi` when it is importable.
+
+Verification is never disabled. With no anchors anywhere the call fails closed
+with a 502 that names the fix, and `--check` exits 1.
+
 ## Model slug + effort convention
 
 Slugs follow `<model-id>[-<effort>][-fast]`, effort one of
@@ -202,6 +216,6 @@ before trusting the lane.
 ## Testing
 
 ```bash
-python3 tools/test-codex-shim.py      # 67/67 — Codex shim, offline, no network
+python3 tools/test-codex-shim.py      # 79/79 — Codex shim, offline, no network
 python3 tools/qa.py                   # repo self-check: leaks, refs, tests
 ```

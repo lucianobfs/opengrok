@@ -69,10 +69,14 @@ Run:
   uv run tools/codex-shim.py             # same thing (PEP 723, no dependencies)
   python3 tools/codex-shim.py --check    # probe upstream, exit 0/1 (doctor)
 
-  TLS trust: this shim verifies certificates with Python's default context. A
-  python.org build whose "Install Certificates.command" never ran has no CA
-  file; either run it once or export SSL_CERT_FILE=/etc/ssl/cert.pem. The shim
-  reports that case as a 502 with the fix in the message.
+  TLS trust: every outbound call verifies the certificate, always. The trust
+  store is Python's default one (SSL_CERT_FILE / SSL_CERT_DIR included); when
+  that store is EMPTY — a python.org build whose "Install Certificates.command"
+  never ran points at a CA file that does not exist — the shim loads the host
+  bundle OpenSSL and curl already use (/etc/ssl/cert.pem and the Linux
+  equivalents), or certifi when it is importable. Verification is never
+  disabled: with no anchors anywhere the call fails closed as a 502 that names
+  the fix.
 
 Run persistence:
   macOS launchd plist example in examples/ (see docs); Windows Startup .vbs
@@ -301,6 +305,89 @@ def error_payload(message: str, type_: str, code: str | None = None) -> dict[str
     return {"error": {"message": message, "type": type_, "code": code}}
 
 
+# --- TLS trust ---------------------------------------------------------------
+# Every outbound call of this shim is HTTPS and every one of them verifies the
+# certificate. The stdlib default context is the first choice, but it is not
+# always usable: a python.org framework build whose "Install
+# Certificates.command" never ran points at a CA file that does not exist, so
+# its trust store holds ZERO anchors and every HTTPS call dies with
+# CERTIFICATE_VERIFY_FAILED, on a host where curl works. The sibling
+# tools/claude-shim.py never sees this because the Anthropic SDK carries
+# certifi. This shim has no dependencies (PEP 723), so it resolves the same
+# thing itself: default store, else the host bundle OpenSSL and curl already
+# use, else certifi when it happens to be importable.
+#
+# Verification is never turned off. With no anchors anywhere the context stays
+# empty and the request fails closed, reported as a 502 carrying TLS_HELP.
+
+# Well-known OpenSSL CA bundles, by platform.
+SYSTEM_CA_FILES = (
+    "/etc/ssl/cert.pem",                    # macOS, FreeBSD
+    "/etc/ssl/certs/ca-certificates.crt",   # Debian, Ubuntu, Alpine
+    "/etc/pki/tls/certs/ca-bundle.crt",     # RHEL, Fedora
+    "/etc/ssl/ca-bundle.pem",               # SUSE
+    "/etc/ssl/certs/ca-bundle.crt",         # older RHEL layout
+)
+
+TLS_HELP = ("no TLS trust anchors on this host: set SSL_CERT_FILE to a CA "
+            "bundle (macOS: /etc/ssl/cert.pem), or run Python's "
+            "\"Install Certificates.command\" once")
+
+
+def ca_anchor_count(context: ssl.SSLContext) -> int:
+    """Number of CA certificates loaded in a context. 0 means it can verify
+    nothing at all, which is the broken-install case, not a policy choice."""
+    try:
+        return int(context.cert_store_stats().get("x509_ca", 0))
+    except (AttributeError, ValueError):  # pragma: no cover - stdlib always has it
+        return 0
+
+
+def ca_bundle_candidates() -> Iterator[str]:
+    """Bundle paths to try, best first. SSL_CERT_FILE/SSL_CERT_DIR are already
+    honored by the default context, so they never reach this list."""
+    for path in SYSTEM_CA_FILES:
+        if os.path.isfile(path):
+            yield path
+    try:
+        import certifi
+    except ImportError:
+        return
+    path = certifi.where()
+    if os.path.isfile(path):
+        yield path
+
+
+def build_ssl_context() -> ssl.SSLContext:
+    """A verifying SSLContext with a trust store that is actually populated."""
+    context = ssl.create_default_context()
+    if ca_anchor_count(context):
+        return context
+    for path in ca_bundle_candidates():
+        try:
+            context.load_verify_locations(cafile=path)
+        except (OSError, ssl.SSLError):
+            continue
+        if ca_anchor_count(context):
+            log.debug("TLS trust store loaded from %s", path)
+            return context
+    log.warning("%s", TLS_HELP)
+    return context
+
+
+_ssl_context: ssl.SSLContext | None = None
+_ssl_lock = threading.Lock()
+
+
+def ssl_context() -> ssl.SSLContext:
+    """Process-wide context, built once. Import stays free of file reads."""
+    global _ssl_context
+    with _ssl_lock:
+        if _ssl_context is None:
+            _ssl_context = build_ssl_context()
+        return _ssl_context
+
+
 # --- credentials -------------------------------------------------------------
 # Wire facts 12-14. Pure helpers first; the store below owns the file and the
 # refresh lock. No token value is ever logged, returned to a client, or written
@@ -476,7 +563,8 @@ class AuthStore:
                      "Accept": "application/json"},
             method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT) as response:
+            with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT,
+                                        context=ssl_context()) as response:
                 refreshed = json.loads(response.read(MAX_ERROR_BODY * 8))
         except urllib.error.HTTPError as exc:
             code = refresh_error_code(exc.read(MAX_ERROR_BODY))
@@ -1312,9 +1400,13 @@ def shim_error_from_http(exc: urllib.error.HTTPError) -> ShimError:
 def shim_error_from_urlerror(exc: urllib.error.URLError) -> ShimError:
     reason = exc.reason
     if isinstance(reason, ssl.SSLCertVerificationError):
-        return ShimError(502, "TLS trust store empty: run Python's "
-                              "\"Install Certificates.command\" once, or set "
-                              "SSL_CERT_FILE=/etc/ssl/cert.pem for this shim",
+        # An empty trust store is a broken install and has a fix; a populated
+        # one that rejected the chain is a different problem (proxy, clock).
+        if ca_anchor_count(ssl_context()):
+            detail = "the certificate chain was rejected by a populated trust store"
+        else:
+            detail = TLS_HELP
+        return ShimError(502, "TLS verification failed: %s" % detail,
                          type_="api_connection_error", code="502")
     return ShimError(502, "upstream unreachable: %s" % type(reason).__name__,
                      type_="api_connection_error", code="502")
@@ -1335,7 +1427,7 @@ def open_responses(payload: dict[str, Any], session_id: str, timeout: float,
         headers["Content-Type"] = "application/json"
         request = urllib.request.Request(RESPONSES_URL, data=data, headers=headers,
                                          method="POST")
-        return urllib.request.urlopen(request, timeout=timeout)
+        return urllib.request.urlopen(request, timeout=timeout, context=ssl_context())
 
     try:
         return attempt(False)
@@ -1369,7 +1461,8 @@ def probe_upstream(force: bool = False, store: AuthStore = AUTH_STORE) -> tuple[
             url = "%s?client_version=%s" % (MODELS_URL, client_version())
             request = urllib.request.Request(
                 url, headers=backend_headers(auth, "", "application/json"), method="GET")
-            with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT) as response:
+            with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT,
+                                        context=ssl_context()) as response:
                 doc = json.loads(response.read(4 * 1024 * 1024))
             count = len(doc.get("models") or []) if isinstance(doc, dict) else 0
             ok, detail = True, "models=%d" % count

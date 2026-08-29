@@ -17,13 +17,16 @@ from __future__ import annotations
 import base64
 import json
 import os
+import ssl
 import stat
 import sys
 import tempfile
 import time
 import types
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 SHIM_PATH = Path(__file__).resolve().parent / "codex-shim.py"
 
@@ -881,6 +884,197 @@ class AuthStoreTests(unittest.TestCase):
             self.assertEqual(second.account_id, "acct_two")
         finally:
             home.cleanup()
+
+
+# --- (l) TLS trust ----------------------------------------------------------
+# A self-signed CA generated once for these tests. It is a public certificate
+# with no private key here and no host it can authenticate: it only gives
+# load_verify_locations() something real to count. Expiry does not matter --
+# loading a bundle never validates dates.
+TEST_CA_PEM = """-----BEGIN CERTIFICATE-----
+MIIBnTCCAUOgAwIBAgIUR3KtI5HKOCiKxM+C6IhsE14MEfcwCgYIKoZIzj0EAwIw
+IzEhMB8GA1UEAwwYb3Blbmdyb2stb2ZmbGluZS10ZXN0LWNhMCAXDTI2MDgyOTAw
+NTkxOVoYDzIxMjYwODA1MDA1OTE5WjAjMSEwHwYDVQQDDBhvcGVuZ3Jvay1vZmZs
+aW5lLXRlc3QtY2EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATDU6xZxMLsISRj
+2TuHdXIG2Q2shMhVB65SkBMEgmPUgSWXpOcehM9TWiaWhQAAJKlpDzRD6eteleor
+f8WVvS+ho1MwUTAdBgNVHQ4EFgQULc18V3KNuinSNJVquA2rd21GXu0wHwYDVR0j
+BBgwFoAULc18V3KNuinSNJVquA2rd21GXu0wDwYDVR0TAQH/BAUwAwEB/zAKBggq
+hkjOPQQDAgNIADBFAiEAnXy7JkjSItJv8PzNBnJyPUiOblKWskRj7LPFxJev9SAC
+IACpj/L6u85BAKByscQ5w0zGSGD2ad68xZW1qgJkWYbn
+-----END CERTIFICATE-----
+"""
+
+
+def _empty_context() -> ssl.SSLContext:
+    """What a python.org build with no installed CA file gives you: verifying,
+    but with zero anchors, so every HTTPS call dies CERTIFICATE_VERIFY_FAILED."""
+    return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+
+class _FakeResponse:
+    def __init__(self, doc: dict) -> None:
+        self._raw = json.dumps(doc).encode("utf-8")
+
+    def read(self, _limit: int | None = None) -> bytes:
+        return self._raw
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+
+class TlsTrustTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved_context = shim._ssl_context
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.ca_path = os.path.join(self._tmpdir.name, "test-ca.pem")
+        with open(self.ca_path, "w", encoding="utf-8") as fh:
+            fh.write(TEST_CA_PEM)
+
+    def tearDown(self) -> None:
+        shim._ssl_context = self._saved_context
+        self._tmpdir.cleanup()
+
+    def test_populated_default_store_is_used_untouched(self) -> None:
+        default = _empty_context()
+        default.load_verify_locations(cafile=self.ca_path)
+
+        def no_candidates():
+            raise AssertionError("candidates consulted while the default store works")
+
+        with mock.patch.object(shim.ssl, "create_default_context", lambda: default), \
+                mock.patch.object(shim, "ca_bundle_candidates", no_candidates):
+            self.assertIs(shim.build_ssl_context(), default)
+
+    def test_empty_default_store_is_repaired_from_a_bundle(self) -> None:
+        with mock.patch.object(shim.ssl, "create_default_context", _empty_context), \
+                mock.patch.object(shim, "SYSTEM_CA_FILES", (self.ca_path,)):
+            context = shim.build_ssl_context()
+        self.assertGreater(shim.ca_anchor_count(context), 0)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+
+    def test_unusable_bundle_is_skipped_for_the_next_candidate(self) -> None:
+        junk = os.path.join(self._tmpdir.name, "junk.pem")
+        with open(junk, "w", encoding="utf-8") as fh:
+            fh.write("not a certificate\n")
+        missing = os.path.join(self._tmpdir.name, "absent.pem")
+        with mock.patch.object(shim.ssl, "create_default_context", _empty_context), \
+                mock.patch.object(shim, "SYSTEM_CA_FILES", (missing, junk, self.ca_path)):
+            context = shim.build_ssl_context()
+        self.assertGreater(shim.ca_anchor_count(context), 0)
+
+    def test_no_anchors_anywhere_still_verifies(self) -> None:
+        """Fail closed. A missing trust store never downgrades verification."""
+        with mock.patch.object(shim.ssl, "create_default_context", _empty_context), \
+                mock.patch.object(shim, "ca_bundle_candidates", lambda: iter(())), \
+                self.assertLogs(shim.log, level="WARNING") as logged:
+            context = shim.build_ssl_context()
+        self.assertEqual(shim.ca_anchor_count(context), 0)
+        self.assertIn("SSL_CERT_FILE", "\n".join(logged.output))
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+
+    def test_candidates_skip_paths_that_do_not_exist(self) -> None:
+        missing = os.path.join(self._tmpdir.name, "absent.pem")
+        with mock.patch.object(shim, "SYSTEM_CA_FILES", (missing, self.ca_path)):
+            self.assertNotIn(missing, list(shim.ca_bundle_candidates()))
+
+    def test_context_is_built_once_and_shared(self) -> None:
+        built = []
+
+        def build():
+            built.append(1)
+            return _empty_context()
+
+        shim._ssl_context = None
+        with mock.patch.object(shim, "build_ssl_context", build):
+            first = shim.ssl_context()
+            second = shim.ssl_context()
+        self.assertIs(first, second)
+        self.assertEqual(len(built), 1)
+
+    def test_probe_sends_the_verified_context(self) -> None:
+        home = TempCodexHome(fake_auth_doc(exp=time.time() + 3600))
+        seen: dict = {}
+
+        def fake_urlopen(_request, **kwargs):
+            seen.update(kwargs)
+            return _FakeResponse({"models": [{"slug": "gpt-5.6-sol"}]})
+
+        try:
+            store = shim.AuthStore(path=home.auth_path)
+            with mock.patch.object(shim.urllib.request, "urlopen", fake_urlopen):
+                ok, detail = shim.probe_upstream(force=True, store=store)
+        finally:
+            home.cleanup()
+        self.assertTrue(ok)
+        self.assertEqual(detail, "models=1")
+        self.assertIs(seen.get("context"), shim.ssl_context())
+
+    def test_responses_call_sends_the_verified_context(self) -> None:
+        home = TempCodexHome(fake_auth_doc(exp=time.time() + 3600))
+        seen: dict = {}
+        sentinel = object()
+
+        def fake_urlopen(_request, **kwargs):
+            seen.update(kwargs)
+            return sentinel
+
+        try:
+            store = shim.AuthStore(path=home.auth_path)
+            with mock.patch.object(shim.urllib.request, "urlopen", fake_urlopen):
+                response = shim.open_responses({"model": "gpt-5.6-sol"}, "sess-1", 5.0,
+                                               store=store)
+        finally:
+            home.cleanup()
+        self.assertIs(response, sentinel)
+        self.assertIs(seen.get("context"), shim.ssl_context())
+
+    def test_token_refresh_sends_the_verified_context(self) -> None:
+        home = TempCodexHome(fake_auth_doc(exp=time.time() - 10))
+        seen: dict = {}
+
+        def fake_urlopen(_request, **kwargs):
+            seen.update(kwargs)
+            return _FakeResponse({"access_token": fake_jwt(exp=time.time() + 3600),
+                                  "refresh_token": "refresh-fake-rotated"})
+
+        try:
+            store = shim.AuthStore(path=home.auth_path)
+            with mock.patch.object(shim.urllib.request, "urlopen", fake_urlopen):
+                store.credentials()
+        finally:
+            home.cleanup()
+        self.assertIs(seen.get("context"), shim.ssl_context())
+
+    def test_empty_store_verification_failure_names_the_fix(self) -> None:
+        shim._ssl_context = _empty_context()
+        err = shim.shim_error_from_urlerror(
+            urllib.error.URLError(ssl.SSLCertVerificationError(1, "verify failed")))
+        self.assertEqual(err.status, 502)
+        self.assertEqual(err.type, "api_connection_error")
+        self.assertIn("SSL_CERT_FILE", err.message)
+
+    def test_populated_store_verification_failure_does_not_blame_the_store(self) -> None:
+        context = _empty_context()
+        context.load_verify_locations(cafile=self.ca_path)
+        shim._ssl_context = context
+        err = shim.shim_error_from_urlerror(
+            urllib.error.URLError(ssl.SSLCertVerificationError(1, "verify failed")))
+        self.assertEqual(err.status, 502)
+        self.assertNotIn("SSL_CERT_FILE", err.message)
+
+    def test_other_url_errors_stay_generic(self) -> None:
+        err = shim.shim_error_from_urlerror(urllib.error.URLError(OSError("down")))
+        self.assertEqual(err.status, 502)
+        self.assertIn("unreachable", err.message)
+        self.assertNotIn("SSL_CERT_FILE", err.message)
 
 
 if __name__ == "__main__":
