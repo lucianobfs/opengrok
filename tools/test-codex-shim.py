@@ -508,6 +508,74 @@ class ToolCallAndResultTests(unittest.TestCase):
         self.assertEqual(json.loads(call["arguments"]), {"city": "NYC"})
 
 
+# --- (g.1) call_id longer than 64 chars gets a deterministic short wire id --
+
+class WireCallIdTests(unittest.TestCase):
+    def test_short_ids_pass_through_unchanged(self) -> None:
+        self.assertEqual(shim.wire_call_id("call_1"), "call_1")
+        exact = "x" * 64
+        self.assertEqual(shim.wire_call_id(exact), exact)
+        self.assertEqual(shim.wire_call_id(""), "")
+
+    def test_long_id_maps_to_a_deterministic_64_char_id(self) -> None:
+        long_id = "a" * 85
+        mapped = shim.wire_call_id(long_id)
+        self.assertEqual(len(mapped), 64)
+        self.assertTrue(mapped.startswith("call_"))
+        self.assertNotEqual(mapped, long_id)
+        self.assertEqual(shim.wire_call_id(long_id), mapped)
+        other_long_id = "b" * 85
+        self.assertNotEqual(shim.wire_call_id(other_long_id), mapped)
+
+    def test_end_to_end_long_tool_call_id_maps_consistently(self) -> None:
+        long_id = "c" * 85
+        body = {
+            "model": "gpt-5.6-sol",
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": None, "tool_calls": [{
+                    "id": long_id, "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city": "NYC"}'},
+                }]},
+                {"role": "tool", "tool_call_id": long_id, "content": "72F"},
+            ],
+        }
+        payload, _ctx = shim.to_responses(body, catalog={})
+        items = payload["input"]
+        function_calls = [i for i in items if i.get("type") == "function_call"]
+        self.assertEqual(len(function_calls), 1)
+        outputs = [i for i in items if i.get("type") == "function_call_output"]
+        self.assertEqual(len(outputs), 1)
+        call_id = function_calls[0]["call_id"]
+        self.assertEqual(call_id, outputs[0]["call_id"])
+        self.assertLessEqual(len(call_id), 64)
+        self.assertNotEqual(call_id, long_id)
+        self.assertEqual(function_calls[0]["name"], "get_weather")
+        self.assertEqual(function_calls[0]["arguments"], '{"city": "NYC"}')
+        self.assertEqual(outputs[0]["output"], "72F")
+        user_messages = [i for i in items if i.get("role") == "user"]
+        self.assertEqual(len(user_messages), 1)
+
+    def test_end_to_end_short_tool_call_id_is_unchanged(self) -> None:
+        body = {
+            "model": "gpt-5.6-sol",
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": None, "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city": "NYC"}'},
+                }]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "72F"},
+            ],
+        }
+        payload, _ctx = shim.to_responses(body, catalog={})
+        items = payload["input"]
+        function_calls = [i for i in items if i.get("type") == "function_call"]
+        outputs = [i for i in items if i.get("type") == "function_call_output"]
+        self.assertEqual(function_calls[0]["call_id"], "call_1")
+        self.assertEqual(outputs[0]["call_id"], "call_1")
+
+
 # --- (h) encrypted reasoning replay LRU --------------------------------------
 
 class ReasoningReplayTests(unittest.TestCase):

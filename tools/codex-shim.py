@@ -134,7 +134,12 @@ memory. Anything a source did not show is dropped, not guessed.
      function_call carries {name, arguments (JSON string), call_id};
      function_call_output carries {call_id, output}. Item ids are stripped on
      replay because store=false is stateless (plugin `filterInput`); a live
-     probe confirmed both variants are accepted.
+     probe confirmed both variants are accepted. The backend limits call_id
+     to 64 characters and answers a longer value with 400
+     string_above_max_length, so this shim maps a longer id to
+     "call_" + sha256(id)[:59]. The mapping is deterministic, so a
+     function_call and its matching function_call_output get the same wire
+     id.
   7. Tool shape: codex-rs/tools/src/responses_api.rs — `ResponsesApiTool`
      serializes {name, description, strict, parameters} under
      `#[serde(tag = "type")] Function` => {"type":"function", ...} (flat, not
@@ -836,6 +841,20 @@ def sanitize_tool_name(name: str) -> str:
     return (cleaned[:119] + "_" + digest)[:128]
 
 
+def wire_call_id(call_id: str) -> str:
+    """Deterministic call_id that fits the backend's 64-char wire limit.
+
+    A call_id of 64 characters or fewer passes through unchanged. A longer
+    call_id is replaced by a derived id of exactly 64 characters, so a
+    function_call and its matching function_call_output still map to the
+    same wire id.
+    """
+    if len(call_id) <= 64:
+        return call_id
+    digest = hashlib.sha256(call_id.encode("utf-8")).hexdigest()[:59]  # naming, not security
+    return "call_" + digest
+
+
 def dropped_keys(body: dict[str, Any]) -> list[str]:
     """Body keys this lane cannot honor. Named in the audit line, never faked.
 
@@ -931,7 +950,7 @@ def assistant_items(msg: dict[str, Any], ctx: RequestContext,
         else:
             arguments = json.dumps(raw_args, separators=(",", ":"))
         calls.append({"type": "function_call",
-                      "call_id": str(call.get("id") or ""),
+                      "call_id": wire_call_id(str(call.get("id") or "")),
                       "name": sanitize_tool_name(str(fn.get("name") or "")),
                       "arguments": arguments})
     if calls and cache is not None:
@@ -949,7 +968,7 @@ def tool_result_item(msg: dict[str, Any]) -> dict[str, Any]:
     call_id = msg.get("tool_call_id")
     if not call_id:
         raise ShimError(400, "tool message without tool_call_id")
-    return {"type": "function_call_output", "call_id": str(call_id),
+    return {"type": "function_call_output", "call_id": wire_call_id(str(call_id)),
             "output": _text_of(msg.get("content"))}
 
 
