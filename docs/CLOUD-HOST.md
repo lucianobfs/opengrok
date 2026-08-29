@@ -9,14 +9,15 @@ original model.
 
 An earlier version of `tools/apply-box-patch.py` in this repo targeted a
 different, non-stock bundle shape. Its anchors do not exist in the stock
-bundle (verified against sand-host version `1bcef91`), so it silently did
+bundle (verified against sand-host version `aea062b`; the unique strings
+also held for the previous `1bcef91` bundle), so it silently did
 nothing on a real box. This document describes the current, verified design.
 
-## The seam
+## The seams
 
-The only place in the stock bundle that both (a) knows the current
-conversation's agent id and (b) builds the executor used for a normal chat
-turn is:
+The main-turn seam is the only place that both (a) knows the current
+conversation's agent id via `host` and (b) builds the executor used for a
+normal chat turn:
 
 ```js
 const baseExecutor = session.getExecutor();
@@ -28,7 +29,21 @@ const baseExecutor = session.getExecutor();
 const baseExecutor = __opengrokHopExecutor(host, session) ?? session.getExecutor();
 ```
 
-and injects a small top-level helper, once, right after the bundle's own
+Memory extraction, episode summary, self-summary (compaction), and the
+background memory-dreaming job call `getExecutor()` on other sessions and
+would still hit Cursor (and its quota) if left alone. The same helper is
+wired at those unique sites. They do not have `host` in scope:
+
+- `summarizeEpisode` / `extractMemories` — duck host
+  `{ getConversationId: () => ctx.get(conversationIdKey2) }`
+  (`baseCtx` is `runCtx.with(conversationIdKey2, host.getTranscriptId())`).
+- `executeSelfSummaryWithRetry` — same duck, trying `conversationIdKey2`
+  then `conversationIdKey`.
+- `MemoryService.runAgent` synthesis/verification —
+  `__opengrokHopExecutor(agentId, null)` (`createHopExecutor` accepts a
+  conversation-id string).
+
+The tool also injects a small top-level helper, once, right after the bundle's own
 `fromRedactedCoreMessages` declaration:
 
 ```js
@@ -51,13 +66,14 @@ because it is the one declaration already proven unique and proven top-level
 against this exact bundle.
 
 `createHopExecutor` (in `tools/hop-executor.cjs`, installed at
-`/home/box/sand-data/hop-executor.cjs`) looks up `host.getConversationId()` in
-`model-bindings.json`. No binding for that agent → it returns `null` and the
-line falls through to the stock `session.getExecutor()`, so an unbound agent
-behaves exactly as before the patch. A binding exists → it returns an
-executor that implements the same `BasePromptExecutor` contract the stock
-executor does, but streams from the bound `hopBaseUrl` instead of the
-built-in model.
+`/home/box/sand-data/hop-executor.cjs`) looks up the conversation id in
+`model-bindings.json`. `host` may be an object with `getConversationId()`
+or a conversation-id string. No binding for that agent → it returns `null`
+and the line falls through to the stock `session.getExecutor()`, so an
+unbound agent behaves exactly as before the patch. A binding exists → it
+returns an executor that implements the same `BasePromptExecutor` contract
+the stock executor does, but streams from the bound `hopBaseUrl` instead of
+the built-in model.
 
 The patch is byte-surgical and idempotent: every anchor is asserted
 `count==1` before it is touched, so a changed upstream bundle makes
@@ -94,10 +110,11 @@ document.
 
 | state | meaning | patch command does | `--check-only` exit |
 |---|---|---|---|
-| unpatched | the marker `__opengrokHopExecutor` is absent | full patch: seam + helper | 1 |
-| patched-stale | the OLD helper block is present verbatim | **migrates in place**: swaps the old helper for the current one, leaves the (identical) seam replacement alone | 3, printed as `PATCHED-STALE:` |
-| patched-current | the current helper block is present verbatim | prints `already patched`, writes nothing | 0 |
-| foreign | the marker is present but neither block matches verbatim | refuses loudly, writes nothing | 1 |
+| unpatched | the marker `__opengrokHopExecutor` is absent | full patch: all seams + helper | 1 |
+| patched-stale | the OLD helper block is present verbatim | **migrates in place**: swaps the old helper for the current one, then applies any still-original extra seams | 3, printed as `PATCHED-STALE:` |
+| patched-partial | current helper present, but a memory/self-summary/dreaming seam is still original | **extends in place**: applies the leftover extra seams | 3, printed as `PATCHED-PARTIAL:` |
+| patched-current | current helper AND every seam replacement present verbatim | prints `already patched`, writes nothing | 0 |
+| foreign | the marker is present but neither helper block matches verbatim | refuses loudly, writes nothing | 1 |
 
 A migration is as safe as a fresh patch: `node --check` on the original bytes,
 a timestamped backup into `--backup-dir` **before** the write, the write, then
@@ -202,7 +219,7 @@ The in-box auto-update watcher runs even when `settings.json` sets
 `autoUpdateWhenIdleOptIn: false` — the in-box branch defeats that opt-out.
 When it fires, `swapHostBundle` replaces `host-main.cjs` with a fresh stock
 copy **and prunes everything else under `/home/box/sand-host/`**. That
-silently undoes the patch (the version file still reads `1bcef91` afterward,
+silently undoes the patch (the version file still reads `aea062b` afterward,
 so `status.json` and the desktop "up to date" view misreport the running
 code as unchanged).
 
@@ -221,16 +238,18 @@ Consequences:
 
 ```bash
 python3 tools/apply-box-patch.py --check-only; echo $?   # expect 0 after bootstrap
-                                                         # 3 = stale helper, re-run the patch
-grep -c "__opengrokHopExecutor" /home/box/sand-host/host-main.cjs   # expect 2
+                                                         # 3 = stale helper or missing extra seams
+grep -c "__opengrokHopExecutor" /home/box/sand-host/host-main.cjs   # expect 7
 grep -c "createHopExecutor(host, session, {})" /home/box/sand-host/host-main.cjs   # expect 1
 curl -fsS http://127.0.0.1:18777/healthz                  # codex-shim up
 tail -f /home/box/sand-data/codex-shim.log                # while sending a message
 ```
 
-The marker appears **twice** in a correctly patched bundle: once at the seam
-call site and once as the injected helper's own name. The second `grep` is the
-one that distinguishes the current helper from the stale one.
+The marker appears **seven** times in a correctly patched bundle: once as the
+injected helper's own name and once at each of the six seam call sites
+(main turn, episode summary, memory extraction, self-summary, dreaming
+synthesis, dreaming verification). The second `grep` is the one that
+distinguishes the current helper from the stale one.
 
 ## Corrections
 

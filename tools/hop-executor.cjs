@@ -1,9 +1,11 @@
 "use strict";
 /* hop-executor.cjs — the box-side consumer for the STOCK Grok Bot cloud host
- * bundle `sand-host` 1bcef91 (25,701,134 bytes, md5 7b7ab6046aa1c343e7baefeed99ef402).
+ * bundle `sand-host` aea062b (25,634,503 bytes, md5 ba86c15a449c5daa2be9e9a0f68fa7a7;
+ * previously 1bcef91 — same unique seam strings).
  *
  * Installed on the box as /home/box/sand-data/hop-executor.cjs. The patched
- * bundle requires it at the main-turn executor seam:
+ * bundle requires it at the main-turn executor seam and at the memory /
+ * self-summary / dreaming getExecutor sites:
  *
  *     const baseExecutor = __opengrokHopExecutor(host, session) ?? session.getExecutor();
  *
@@ -26,8 +28,10 @@
  * the 19539275 and 16083633 notes below for the evidence.
  *
  * CONTRACT — createHopExecutor(host, session, deps):
- *     host     an object with getConversationId()
+ *     host     an object with getConversationId(), OR a non-empty
+ *              conversation-id string (memory-dreaming seams pass agentId)
  *     session  the stock session; only used by the caller for the fallback
+ *              (may be null at the dreaming sites)
  *     deps     OPTIONAL bag, { log? }. `log` receives one preformatted line
  *              instead of stderr. undefined, {} and { log } all behave the
  *              same; there is no required dependency, so the injected helper
@@ -754,14 +758,17 @@ class HopPromptExecutor {
 
 /* Return an executor for this conversation, or null to keep the stock path. */
 function createHopExecutor(host, session, deps) {
-  if (!host || typeof host.getConversationId !== "function") {
-    return null;
-  }
-  let conversationId;
-  try {
-    conversationId = host.getConversationId();
-  } catch (error) {
-    reportProblemOnce(deps, "hop executor disabled: getConversationId failed: " + describeError(error));
+  let conversationId = null;
+  if (typeof host === "string") {
+    conversationId = host;
+  } else if (host && typeof host.getConversationId === "function") {
+    try {
+      conversationId = host.getConversationId();
+    } catch (error) {
+      reportProblemOnce(deps, "hop executor disabled: getConversationId failed: " + describeError(error));
+      return null;
+    }
+  } else {
     return null;
   }
   if (!nonEmptyString(conversationId)) {

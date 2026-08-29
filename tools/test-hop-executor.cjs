@@ -170,6 +170,14 @@ check("null when the bindings file is malformed", () => {
   eq(require("./hop-executor.cjs").createHopExecutor(host, session, deps), null);
 });
 
+check("a conversation-id string is accepted in place of a host object", () => {
+  writeBindings(bindingsFor("http://127.0.0.1:1/v1"));
+  ok(require("./hop-executor.cjs").createHopExecutor(AGENT_ID, session, deps) !== null);
+  ok(require("./hop-executor.cjs").createHopExecutor(AGENT_ID, null, deps) !== null);
+  eq(require("./hop-executor.cjs").createHopExecutor("", session, deps), null);
+  eq(require("./hop-executor.cjs").createHopExecutor(null, session, deps), null);
+});
+
 check("null when no entry matches the conversation id", () => {
   writeBindings(JSON.stringify({
     agents: { [OTHER_AGENT_ID]: { modelId: "m", hopBaseUrl: "http://127.0.0.1:1/v1" } }
