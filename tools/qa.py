@@ -18,17 +18,33 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent   # repo root
 fails, warns = [], []
 
+# Directories that are not repo content: VCS metadata, agent/tool state (which
+# holds git worktrees of other branches), dependency trees and build caches.
+# Scanning them is meaningless and self-defeating: .git/COMMIT_EDITMSG keeps the
+# last commit message, so a commit that merely describes removing a leaked IP
+# would fail the leak scan forever.
+SKIP_DIRS = {".git", ".claude", "node_modules", "__pycache__",
+             ".venv", "venv", ".mypy_cache", ".pytest_cache"}
+
+
+def repo_files(pattern="*"):
+    """Yield files under the repo root, skipping non-content directories."""
+    for f in sorted(HERE.rglob(pattern)):
+        if not f.is_file():
+            continue
+        if SKIP_DIRS.isdisjoint(f.relative_to(HERE).parts[:-1]):
+            yield f
+
+
 # 1a. python compiles
-for p in sorted(HERE.rglob("*.py")):
-    if "__pycache__" in str(p):
-        continue
+for p in repo_files("*.py"):
     r = subprocess.run([sys.executable, "-m", "py_compile", str(p)], capture_output=True, text=True)
     if r.returncode:
         fails.append(f"compile: {p.name}: {r.stderr[-120:]}")
 
 # 1b. cjs syntax
 node = shutil_which()
-for p in sorted(HERE.rglob("*.cjs")):
+for p in repo_files("*.cjs"):
     if not node:
         warns.append("node not found - cjs syntax unchecked")
         break
@@ -37,14 +53,14 @@ for p in sorted(HERE.rglob("*.cjs")):
         fails.append(f"syntax: {p.name}: {r.stderr[-120:]}")
 
 # 1c. json parses
-for p in sorted(HERE.rglob("*.json")):
+for p in repo_files("*.json"):
     try:
         json.loads(p.read_text(encoding="utf-8"))
     except Exception as e:
         fails.append(f"json: {p.name}: {e}")
 
 # 2. cross-references resolve
-for md in sorted(HERE.rglob("*.md")):
+for md in repo_files("*.md"):
     txt = md.read_text(encoding="utf-8")
     for ref in re.findall(r"(?<!:)(?:docs|tools|examples)/[A-Za-z0-9_./-]+", txt):
         if not (HERE / ref).exists():
@@ -53,7 +69,7 @@ for md in sorted(HERE.rglob("*.md")):
 # 3. leak scan
 IPV4 = re.compile(r"\b(?!127\.0\.0\.1|0\.0\.0\.0)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b")
 KEYISH = re.compile(r"\b(sk|xai|Bearer|hsk|ak)[-_][A-Za-z0-9]{16,}\b", re.I)
-for p in sorted(x for x in HERE.rglob("*") if x.is_file()):
+for p in repo_files():
     if p.suffix in (".png", ".ico"):
         continue
     try:

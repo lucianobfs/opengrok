@@ -26,3 +26,6 @@ assets/picker-raw.png
 assets/picker-shot.png
 demo-picker.log
 assets/appmock-raw.png
+
+# Agent/tool state (holds nested git worktrees)
+.claude/
