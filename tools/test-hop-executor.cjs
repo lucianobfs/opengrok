@@ -47,18 +47,9 @@ function ok(value, msg) {
 
 /* --- fixtures ------------------------------------------------------------ */
 
-/* The runner unwraps redacted messages before the request. The fake dep is the
- * identity function, so the test drives plain core messages. */
-const deps = {
-  fromRedactedCoreMessages: (messages, capability) => {
-    if (capability !== "UNSAFE_ALWAYS_ALLOWED") {
-      throw new Error("wrong privacy capability: " + String(capability));
-    }
-    return messages;
-  },
-  PrivacyCapability: { UNSAFE_ALWAYS_ALLOWED: "UNSAFE_ALWAYS_ALLOWED" },
-  log: () => {}
-};
+/* deps is an OPTIONAL { log? } bag; the module requires nothing from the
+ * bundle. `log` here only keeps the test output clean. */
+const deps = { log: () => {} };
 
 const host = { getConversationId: () => AGENT_ID };
 const session = { getExecutor: () => { throw new Error("the stock executor must not be used"); } };
@@ -194,6 +185,12 @@ check("null when the entry has no hopBaseUrl", () => {
 check("a bare top-level map is accepted as a fallback shape", () => {
   writeBindings(JSON.stringify({ [AGENT_ID]: { modelId: "m", hopBaseUrl: "http://127.0.0.1:1/v1" } }));
   ok(require("./hop-executor.cjs").createHopExecutor(host, session, deps) !== null);
+  /* deps is optional: the injected helper passes {} and closes over nothing,
+   * so an omitted deps must behave exactly like an empty one. */
+  ok(
+    require("./hop-executor.cjs").createHopExecutor(host, session) !== null,
+    "createHopExecutor must return an executor with deps omitted"
+  );
 });
 
 check("bindings are re-read on every call, so an edit needs no restart", () => {
@@ -299,6 +296,55 @@ check("the request body carries the converted messages and tools", async () => {
       function: { name: "read", description: "read a file", parameters: { type: "object", properties: {} } }
     }
   ], "provider-defined tools must be skipped");
+});
+
+/* REGRESSION, live failure 2026-08-29. An earlier build unwrapped its own
+ * stored messages with fromRedactedCoreMessages, so a real box turn died with
+ *   [opengrok] hop conversation=7e509c66-... status=0
+ *              error=message.content.unwrap is not a function
+ * (fromRedactedSystemMessage @16083633 calls message.content.unwrap on a PLAIN
+ * system prompt). The messages this executor holds are PLAIN core messages —
+ * RedactedPromptToolExecutor @19539275 unwraps OUTSIDE it — so this check
+ * drives the exact shape that crashed and asserts the body it must produce. */
+check("regression: a whole PLAIN turn converts (the message.content.unwrap crash)", async () => {
+  routes.set("/v1/chat/completions", sseRoute([
+    { id: "resp-plain", model: "test-model", choices: [{ index: 0, delta: { content: "ok" } }] }
+  ]));
+  writeBindings(bindingsFor(baseUrl));
+  const executor = require("./hop-executor.cjs").createHopExecutor(host, session, deps);
+  executor.appendMessages([
+    /* a system prompt with STRING content — coreMessageToProto @23011518
+     * accepts nothing else for the system role. This is the part that threw. */
+    { role: "system", content: "You are a helpful assistant." },
+    { role: "user", content: [{ type: "text", text: "list the files" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "listing now" },
+        { type: "tool-call", toolCallId: "call_ls", toolName: "ls", args: { path: "." } }
+      ]
+    },
+    {
+      role: "tool",
+      content: [
+        { type: "tool-result", toolCallId: "call_ls", toolName: "ls", result: "a.txt\nb.txt" }
+      ]
+    }
+  ]);
+  const parts = await drain(executor.stream({}, "inv-plain", [], {}));
+  eq(parts[0].type, "text-delta", "the turn must reach the shim, not throw");
+  deepEq(lastRequestBody.messages, [
+    { role: "system", content: "You are a helpful assistant." },
+    { role: "user", content: "list the files" },
+    {
+      role: "assistant",
+      content: "listing now",
+      tool_calls: [
+        { id: "call_ls", type: "function", function: { name: "ls", arguments: "{\"path\":\".\"}" } }
+      ]
+    },
+    { role: "tool", tool_call_id: "call_ls", content: "a.txt\nb.txt" }
+  ]);
 });
 
 check("an image part becomes an image_url data url", async () => {

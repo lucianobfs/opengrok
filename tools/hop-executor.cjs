@@ -19,6 +19,20 @@
  *     stream(ctx, invocationId, tools, options)
  *       -> { fullStream, usage, extendedUsage, providerMetadata, invocationId, response }
  *
+ * MESSAGES AT THIS SEAM ARE PLAIN CORE MESSAGES. They are NOT redacted
+ * wrappers, so this module never unwraps anything: it converts what it stores
+ * straight to chat/completions, exactly as the stock ProtoPromptExecutor feeds
+ * this.builder.getMessages() straight into coreMessageToProto @23011518. See
+ * the 19539275 and 16083633 notes below for the evidence.
+ *
+ * CONTRACT — createHopExecutor(host, session, deps):
+ *     host     an object with getConversationId()
+ *     session  the stock session; only used by the caller for the fallback
+ *     deps     OPTIONAL bag, { log? }. `log` receives one preformatted line
+ *              instead of stderr. undefined, {} and { log } all behave the
+ *              same; there is no required dependency, so the injected helper
+ *              passes {} and closes over nothing.
+ *
  * BUNDLE BYTE OFFSETS THIS FILE WAS DERIVED FROM (all re-read, not guessed):
  *   15991774  BasePromptBuilder / BasePromptExecutor / BaseMiddleware.
  *             getState() and getMessages() both return a COPY of the array.
@@ -30,12 +44,34 @@
  *             createFullStream is an ASYNC GENERATOR, so fullStream is an
  *             async iterable, not a ReadableStream.
  *   23041637  protoResponseToStreamParts: the authoritative stream-part union.
- *   23011518  coreMessageToProto: the exact CoreMessage role and part shapes.
- *   19794812  the runner call site:
- *               fromRedactedCoreMessages(executor.getMessages(),
+ *   23011518  coreMessageToProto: the exact CoreMessage role and part shapes,
+ *             and the proof they are PLAIN — it branches on
+ *             `typeof msg.content === "string"` and `Array.isArray(msg.content)`.
+ *             Roles and parts it accepts: system (string), user (string |
+ *             text/image/file parts), assistant (string | text/tool-call/
+ *             reasoning/redacted-reasoning parts), tool (tool-result parts).
+ *             userContentPartToProto @23018305 is the per-part detail; an
+ *             unknown user part becomes empty text there, which is what
+ *             dropping it here amounts to.
+ *   19539275  RedactedPromptToolExecutor. It WRAPS an inner executor — the slot
+ *             this module fills. appendMessages() calls
+ *               fromRedactedCoreMessages(arr, PrivacyCapability.UNSAFE_ALWAYS_ALLOWED)
+ *             and forwards the PLAIN result to innerToolExecutor.appendMessages;
+ *             getState()/getMessages() re-wrap on the way OUT with
+ *             toRedactedCoreMessages; stream() forwards untouched. Unwrapping
+ *             therefore happens OUTSIDE the inner executor, in both directions.
+ *   19795174  the runner call site:
+ *               fromRedactedCoreMessages(rootPromptExecutor.getMessages(),
  *                                        PrivacyCapability.UNSAFE_ALWAYS_ALLOWED)
- *             Two arguments. The builder holds REDACTED messages, so a naive
- *             JSON.stringify would send wrapper objects instead of text.
+ *             It operates on the OUTER redacted wrapper, never on the inner
+ *             executor's own storage. (The analysis report cites 19794812, the
+ *             enclosing step-setup block; the call itself starts at 19795174.)
+ *   16083633  fromRedactedSystemMessage, body `message.content.unwrap(purpose,
+ *             opts)`. An earlier version of this file unwrapped its own stored
+ *             messages, which fed a PLAIN system message into this function and
+ *             produced the live failure
+ *               error=message.content.unwrap is not a function
+ *             on a real box turn. That premise was wrong; plain in, plain out.
  *   19515664  streamModelAndCollectToolCalls: the stream() call site and the
  *             consumer of every part. It iterates fullStream with `for await`.
  *   19530567  SimplePromptToolExecutor / executeToolStream.
@@ -188,8 +224,10 @@ function createDeferred() {
 }
 
 /* ---------------------------------------------------------------------------
- * Core message -> OpenAI chat/completions message conversion.
- * Part shapes come from coreMessageToProto @23011518.
+ * PLAIN core message -> OpenAI chat/completions message conversion.
+ * Part shapes come from coreMessageToProto @23011518 and
+ * userContentPartToProto @23018305. Nothing here unwraps a redacted wrapper:
+ * see the 19539275 note in the header for why none ever reaches this module.
  * ------------------------------------------------------------------------- */
 
 function textFromParts(parts) {
@@ -497,13 +535,14 @@ class HopPromptExecutor {
     let failure = null;
     let usageValue = null;
     try {
-      const unwrapped = this.deps.fromRedactedCoreMessages(
-        this.getMessages(),
-        this.deps.PrivacyCapability.UNSAFE_ALWAYS_ALLOWED
-      );
+      /* The messages held here are PLAIN core messages, never redacted ones:
+       * RedactedPromptToolExecutor @19539275 unwraps on the way IN and re-wraps
+       * on the way OUT, OUTSIDE the inner executor this module replaces. So the
+       * conversion is direct, exactly as coreMessageToProto @23011518 does it.
+       * getMessages() already returns a fresh array. */
       const body = {
         model: this.binding.modelId,
-        messages: coreMessagesToOpenAi(Array.isArray(unwrapped) ? unwrapped : []),
+        messages: coreMessagesToOpenAi(this.getMessages()),
         tools: toolsToOpenAi(tools),
         stream: true,
         stream_options: { include_usage: true }
@@ -730,14 +769,6 @@ function createHopExecutor(host, session, deps) {
   }
   const binding = readBinding(conversationId, deps);
   if (binding === null) {
-    return null;
-  }
-  if (!deps || typeof deps.fromRedactedCoreMessages !== "function" ||
-      !deps.PrivacyCapability || deps.PrivacyCapability.UNSAFE_ALWAYS_ALLOWED === undefined) {
-    reportProblemOnce(
-      deps,
-      "hop executor disabled: the patch site did not supply fromRedactedCoreMessages and PrivacyCapability"
-    );
     return null;
   }
   if (typeof fetch !== "function") {

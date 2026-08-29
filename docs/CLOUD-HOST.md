@@ -29,20 +29,26 @@ const baseExecutor = __opengrokHopExecutor(host, session) ?? session.getExecutor
 ```
 
 and injects a small top-level helper, once, right after the bundle's own
-declarations of `fromRedactedCoreMessages` and `PrivacyCapability` (the two
-bundle-internal symbols the helper needs — see "Why those two symbols" below):
+`fromRedactedCoreMessages` declaration:
 
 ```js
 function __opengrokHopExecutor(host, session) {
   try {
     const m = require('/home/box/sand-data/hop-executor.cjs');
-    return m.createHopExecutor(host, session, { fromRedactedCoreMessages, PrivacyCapability });
+    return m.createHopExecutor(host, session, {});
   } catch (e) {
     process.stderr.write('[opengrok] hop executor disabled: ' + (e && e.message) + '\n');
     return null;
   }
 }
 ```
+
+The helper **closes over nothing**. The third argument is an empty deps bag
+(`createHopExecutor` treats `deps` as an optional `{ log? }`), so the injection
+point is only a *placement* choice, not a scope dependency — see "Why the
+messages are plain" below. `fromRedactedCoreMessages` is kept as the anchor
+because it is the one declaration already proven unique and proven top-level
+against this exact bundle.
 
 `createHopExecutor` (in `tools/hop-executor.cjs`, installed at
 `/home/box/sand-data/hop-executor.cjs`) looks up `host.getConversationId()` in
@@ -59,16 +65,46 @@ The patch is byte-surgical and idempotent: every anchor is asserted
 `tools/apply-box-patch.py --help` for `--dry-run`, `--check-only`, and
 `--revert`.
 
-### Why those two symbols
+### Why the messages are plain
 
-`fromRedactedCoreMessages` and `PrivacyCapability` are the bundle-internal
-helpers the stock runner already uses to unwrap redacted core messages before
-handing them to a model. The injected executor needs the same unwrap step
-(the messages it receives from the builder are REDACTED core messages, not
-plain ones), so the helper resolves both symbols from the bundle's own scope
-and passes them into `createHopExecutor` as `deps` rather than reimplementing
-message-redaction logic in `tools/hop-executor.cjs`. `apply-box-patch.py`
-verifies both are reachable at the injection point before it writes anything.
+The messages the injected executor holds at this seam are **plain core
+messages**, not redacted wrappers. Redaction is handled one layer OUT:
+
+- `RedactedPromptToolExecutor` (bundle @19539275) *wraps* an inner executor —
+  the slot `__opengrokHopExecutor` fills. Its `appendMessages` calls
+  `fromRedactedCoreMessages(arr, PrivacyCapability.UNSAFE_ALWAYS_ALLOWED)` and
+  forwards the **plain** result to `innerToolExecutor.appendMessages`; its
+  `getState`/`getMessages` re-wrap on the way out with
+  `toRedactedCoreMessages`; its `stream` forwards untouched.
+- The stock `ProtoPromptExecutor` therefore feeds `this.builder.getMessages()`
+  straight into `coreMessageToProto` (@23011518), which branches on
+  `typeof msg.content === "string"` and `Array.isArray(msg.content)`.
+- The runner call site that *does* unwrap (@19795174) operates on the outer
+  redacted wrapper, never on the inner executor's own storage.
+
+So `tools/hop-executor.cjs` converts what it stores directly to
+chat/completions, exactly as `coreMessageToProto` does, and needs no
+bundle-internal symbol at all. An earlier version of this design unwrapped its
+own storage and crashed a live turn — see "Corrections" at the end of this
+document.
+
+### Patch states and migration
+
+`apply-box-patch.py` classifies a bundle from its bytes alone:
+
+| state | meaning | patch command does | `--check-only` exit |
+|---|---|---|---|
+| unpatched | the marker `__opengrokHopExecutor` is absent | full patch: seam + helper | 1 |
+| patched-stale | the OLD helper block is present verbatim | **migrates in place**: swaps the old helper for the current one, leaves the (identical) seam replacement alone | 3, printed as `PATCHED-STALE:` |
+| patched-current | the current helper block is present verbatim | prints `already patched`, writes nothing | 0 |
+| foreign | the marker is present but neither block matches verbatim | refuses loudly, writes nothing | 1 |
+
+A migration is as safe as a fresh patch: `node --check` on the original bytes,
+a timestamped backup into `--backup-dir` **before** the write, the write, then
+`node --check` on the result — and a failed post-check restores the backup and
+exits non-zero. Running the tool twice is a no-op the second time.
+`--dry-run` on a stale bundle prints `would MIGRATE` and writes nothing.
+`--revert` is unchanged: it restores the newest backup in `--backup-dir`.
 
 ## File layout on the box
 
@@ -129,9 +165,15 @@ needs may live there except the patched `host-main.cjs` itself.
 3. **Patch** the host (bootstrap already does this; run it standalone to
    check state):
    ```bash
-   python3 tools/apply-box-patch.py --check-only; echo $?   # 0 patched, 1 unpatched, 2 unknown bundle
+   # 0 patched (current), 1 unpatched, 2 unknown bundle, 3 patched-STALE
+   python3 tools/apply-box-patch.py --check-only; echo $?
    python3 tools/apply-box-patch.py --dry-run                # show what would change
+   python3 tools/apply-box-patch.py                          # patch, or migrate a stale helper
    ```
+   Exit 3 from `--check-only` means the host carries an OLD helper. Run the
+   patch command with no flags: it migrates the helper in place (backup and
+   `node --check` both ways, same as a fresh patch) and is a no-op if you run
+   it again. A migration changes the running code, so step 4 is required.
 
 4. **Restart** (supervisor-safe, never a raw kill):
    ```bash
@@ -179,7 +221,48 @@ Consequences:
 
 ```bash
 python3 tools/apply-box-patch.py --check-only; echo $?   # expect 0 after bootstrap
-grep -c "__opengrokHopExecutor" /home/box/sand-host/host-main.cjs   # expect 1
+                                                         # 3 = stale helper, re-run the patch
+grep -c "__opengrokHopExecutor" /home/box/sand-host/host-main.cjs   # expect 2
+grep -c "createHopExecutor(host, session, {})" /home/box/sand-host/host-main.cjs   # expect 1
 curl -fsS http://127.0.0.1:18777/healthz                  # codex-shim up
 tail -f /home/box/sand-data/codex-shim.log                # while sending a message
 ```
+
+The marker appears **twice** in a correctly patched bundle: once at the seam
+call site and once as the injected helper's own name. The second `grep` is the
+one that distinguishes the current helper from the stale one.
+
+## Corrections
+
+**The seam does not hold redacted messages.** The first analysis of the stock
+bundle claimed the executor at
+`const baseExecutor = session.getExecutor();` receives REDACTED core messages,
+and concluded the injected executor had to unwrap them with
+`fromRedactedCoreMessages(msgs, PrivacyCapability.UNSAFE_ALWAYS_ALLOWED)`. The
+first shipped version of `tools/hop-executor.cjs` did exactly that.
+
+**The live evidence that disproved it.** A real turn on the box failed with
+
+```
+[opengrok] hop conversation=7e509c66-... model=gpt-5.6-sol-xhigh status=0 \
+  error=message.content.unwrap is not a function
+```
+
+surfaced on the desktop as "Technical details: message.content.unwrap is not a
+function". `fromRedactedSystemMessage` (@16083633) is
+`message.content.unwrap(purpose, opts)` — it threw because the system prompt
+handed to it was a plain string, not a redacted wrapper.
+
+**The offsets that settle it.**
+
+- `@19539275` `RedactedPromptToolExecutor` wraps the inner executor. It calls
+  `fromRedactedCoreMessages` on the way IN and `toRedactedCoreMessages` on the
+  way OUT, so unwrapping happens outside the executor this patch replaces.
+- `@23011518` `coreMessageToProto` reads `msg.content` as a string or an array
+  — the stock executor never unwraps either.
+- `@16083633` `fromRedactedSystemMessage` is the function that threw.
+
+**What changed.** The unwrap step and the `fromRedactedCoreMessages` /
+`PrivacyCapability` deps are gone; `deps` is now an optional `{ log? }` bag and
+the injected helper passes `{}`. `tools/test-hop-executor.cjs` carries a named
+regression check that drives the exact message shape that crashed.

@@ -36,6 +36,42 @@ HELPER_ANCHOR = (
     "}"
 )
 MARKER = "__opengrokHopExecutor"
+REPLACEMENT_SEAM = (
+    "const baseExecutor = __opengrokHopExecutor(host, session) ?? session.getExecutor();"
+)
+
+# The helper block the CURRENT tool injects. Duplicated here on purpose, in the
+# same style as SEAM/HELPER_ANCHOR/MARKER: the script is a __main__ CLI and is
+# never imported, so the test must state the contract independently.
+HELPER_CODE = (
+    "\n"
+    "function __opengrokHopExecutor(host, session) {\n"
+    "  try {\n"
+    "    const m = require('/home/box/sand-data/hop-executor.cjs');\n"
+    "    return m.createHopExecutor(host, session, {});\n"
+    "  } catch (e) {\n"
+    "    process.stderr.write('[opengrok] hop executor disabled: ' + (e && e.message) + '\\n');\n"
+    "    return null;\n"
+    "  }\n"
+    "}\n"
+)
+
+# The helper block the PREVIOUS generation of the tool injected, and that the
+# live box carries right now. Copied byte-for-byte from
+# `git show HEAD~:tools/apply-box-patch.py`. It differs from HELPER_CODE in one
+# line only: the deps bag passed to createHopExecutor.
+OLD_HELPER_CODE = (
+    "\n"
+    "function __opengrokHopExecutor(host, session) {\n"
+    "  try {\n"
+    "    const m = require('/home/box/sand-data/hop-executor.cjs');\n"
+    "    return m.createHopExecutor(host, session, { fromRedactedCoreMessages, PrivacyCapability });\n"
+    "  } catch (e) {\n"
+    "    process.stderr.write('[opengrok] hop executor disabled: ' + (e && e.message) + '\\n');\n"
+    "    return null;\n"
+    "  }\n"
+    "}\n"
+)
 
 
 def fixture_source(seam_copies=1, helper_copies=1):
@@ -70,6 +106,19 @@ def fixture_source(seam_copies=1, helper_copies=1):
         "module.exports = { runTurn };\n"
     )
     return "".join(parts)
+
+
+def old_patched_fixture_source():
+    """Reproduce exactly what the PREVIOUS generation of the tool wrote: the
+    seam replacement plus the OLD helper injected after the anchor. This is the
+    state the live box is in.
+    """
+    src = fixture_source()
+    assert src.count(SEAM) == 1
+    src = src.replace(SEAM, REPLACEMENT_SEAM, 1)
+    assert src.count(HELPER_ANCHOR) == 1
+    src = src.replace(HELPER_ANCHOR, HELPER_ANCHOR + OLD_HELPER_CODE, 1)
+    return src
 
 
 def run_tool(*args, cwd=None):
@@ -207,6 +256,94 @@ class ApplyBoxPatchTests(unittest.TestCase):
         self.assertEqual(r2.returncode, 3, r2.stdout + r2.stderr)
 
 
+class MigrateOldHelperTests(unittest.TestCase):
+    """The live box carries the OLD helper (the one whose unwrap step crashed a
+    real turn with 'message.content.unwrap is not a function'). The tool must
+    recognise that state and migrate it in place.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="apply-box-patch-migrate-")
+        self.host = os.path.join(self.tmpdir, "host-main.cjs")
+        self.version_file = os.path.join(self.tmpdir, "version")
+        self.backup_dir = os.path.join(self.tmpdir, "host-backups")
+        with open(self.host, "w", encoding="utf-8") as f:
+            f.write(old_patched_fixture_source())
+        with open(self.version_file, "w", encoding="utf-8") as f:
+            f.write(EXPECTED_VERSION)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _common_args(self):
+        return ["--host", self.host, "--backup-dir", self.backup_dir]
+
+    def test_check_only_reports_stale_distinctly_with_exit_3(self):
+        r = run_tool("--check-only", *self._common_args())
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("PATCHED-STALE:", r.stdout)
+        # never confusable with the plain patched line
+        self.assertFalse(r.stdout.startswith("PATCHED:"))
+
+    def test_dry_run_reports_migrate_intent_and_writes_nothing(self):
+        before = open(self.host, "rb").read()
+        r = run_tool("--dry-run", *self._common_args())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would MIGRATE", r.stdout)
+        self.assertNotIn("would patch", r.stdout)
+        self.assertEqual(open(self.host, "rb").read(), before)
+        self.assertFalse(os.path.exists(self.backup_dir))
+
+    def test_patch_migrates_old_helper_in_place(self):
+        r = run_tool(*self._common_args())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        migrated = open(self.host, encoding="utf-8").read()
+
+        self.assertIn(HELPER_CODE, migrated)
+        self.assertNotIn(OLD_HELPER_CODE, migrated)
+        self.assertNotIn("fromRedactedCoreMessages, PrivacyCapability", migrated)
+        # the seam replacement is identical in both generations: left alone
+        self.assertEqual(migrated.count(REPLACEMENT_SEAM), 1)
+        self.assertEqual(migrated.count(SEAM), 0)
+        self.assertEqual(migrated.count(MARKER), 2)
+
+        backups = os.listdir(self.backup_dir)
+        self.assertEqual(len(backups), 1)
+        backup = open(os.path.join(self.backup_dir, backups[0]), encoding="utf-8").read()
+        self.assertIn(OLD_HELPER_CODE, backup)
+
+        check = subprocess.run(["node", "--check", self.host], capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+        r2 = run_tool("--check-only", *self._common_args())
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        self.assertIn("PATCHED:", r2.stdout)
+
+    def test_migration_is_idempotent(self):
+        r = run_tool(*self._common_args())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        migrated = open(self.host, "rb").read()
+
+        r2 = run_tool(*self._common_args())
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        self.assertIn("already patched", r2.stdout)
+        self.assertEqual(open(self.host, "rb").read(), migrated)
+        self.assertEqual(len(os.listdir(self.backup_dir)), 1)
+
+    def test_foreign_patch_refuses_and_changes_nothing(self):
+        foreign = fixture_source() + (
+            "\nfunction __opengrokHopExecutor(host, session) { return null; }\n"
+        )
+        with open(self.host, "w", encoding="utf-8") as f:
+            f.write(foreign)
+        for argv in ([], ["--check-only"], ["--dry-run"]):
+            r = run_tool(*argv, *self._common_args())
+            self.assertEqual(r.returncode, 1, f"{argv}: {r.stdout}{r.stderr}")
+            self.assertIn("foreign or hand-edited", r.stderr)
+            self.assertEqual(open(self.host, encoding="utf-8").read(), foreign)
+            self.assertFalse(os.path.exists(self.backup_dir))
+
+
 class RealBundleTests(unittest.TestCase):
     """Optional block against the real stock 1bcef91 bundle, if present on
     this machine. Skipped (with a printed line) when the file is absent —
@@ -232,6 +369,7 @@ if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(ApplyBoxPatchTests))
+    suite.addTests(loader.loadTestsFromTestCase(MigrateOldHelperTests))
     suite.addTests(loader.loadTestsFromTestCase(RealBundleTests))
     runner = unittest.TextTestRunner(verbosity=0, stream=sys.stdout)
     result = runner.run(suite)
