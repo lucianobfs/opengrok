@@ -109,7 +109,7 @@ class TestBoxBind(unittest.TestCase):
         r = run(
             "--agent", "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
             "--model", "some-model",
-            "--hop", "http://10.0.0.5:18777/v1",
+            "--hop", "http://box.example.com:18777/v1",
             "--bindings", str(self.bindings),
         )
         self.assertNotEqual(r.returncode, 0)
